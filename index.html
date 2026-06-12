@@ -1,87 +1,142 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>실시간 텍스트 릴레이</title>
-    <style>
+	<meta charset="UTF-8">
+	<title>GitHub 기반 안전 텍스트 릴레이</title>
+	<style>
         body { font-family: sans-serif; padding: 20px; background: #f5f5f5; max-width: 600px; margin: 0 auto; }
         .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        textarea { width: 100%; height: 200px; margin-top: 10px; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; resize: vertical; }
-        input { padding: 8px; width: 60%; margin-right: 5px; }
-        button { padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .status { margin-top: 10px; font-size: 0.9em; color: #666; }
-    </style>
+        textarea { width: 100%; height: 250px; margin-top: 10px; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #218838; }
+        .mode-box { padding: 15px; margin-bottom: 15px; border-radius: 4px; font-weight: bold; }
+        .local-bg { background: #e2f0d9; color: #385723; }
+        .remote-bg { background: #fff2cc; color: #7f6000; }
+        .status { font-size: 0.9em; color: #666; margin-top: 5px; }
+	</style>
 </head>
 <body>
 
 <div class="container">
-    <h2>실시간 텍스트 릴레이</h2>
-    
-    <div id="room-selection">
-        <input type="text" id="room-input" placeholder="사용할 방 이름 입력 (예: mysecret123)">
-        <button onclick="joinRoom()">방 입장</button>
-    </div>
+	<h2>🔒 GitHub 텍스트 릴레이</h2>
 
-    <div id="chat-area" style="display:none;">
-        <h3 id="room-title"></h3>
-        <p class="status">⚠️ 텍스트를 입력하면 상대방 화면에 즉시 반영됩니다.</p>
-        <textarea id="text-box" placeholder="여기에 텍스트를 입력하거나 붙여넣으세요..." oninput="sendText(this.value)"></textarea>
-        <div style="margin-top: 10px;">
-            <button onclick="clearText()" style="background:#dc3545;">전체 삭제</button>
-        </div>
-    </div>
+	<!-- 역할 선택 -->
+	<div id="setup">
+		<p>현재 컴퓨터의 역할을 선택하세요:</p>
+		<button onclick="startAsLocal()" style="background:#007bff;">보내는 컴퓨터 (로컬)</button>
+		<button onclick="startAsRemote()" style="background:#ffc107; color:black;">받는 컴퓨터 (원격)</button>
+	</div>
+
+	<!-- 로컬 화면 (송신) -->
+	<div id="local-area" style="display:none;">
+		<div class="mode-box local-bg">모드: 로컬 컴퓨터 (텍스트 송신)</div>
+		<textarea id="local-text" placeholder="원격으로 보낼 텍스트를 입력하세요..."></textarea>
+		<div style="margin-top:10px;">
+			<button onclick="sendToGithub()">원격 컴퓨터로 전송하기</button>
+			<span id="send-status" class="status"></span>
+		</div>
+	</div>
+
+	<!-- 원격 화면 (수신) -->
+	<div id="remote-area" style="display:none;">
+		<div class="mode-box remote-bg">모드: 원격 데스크톱 (3초마다 자동 동기화 중...)</div>
+		<textarea id="remote-text" readonly placeholder="로컬에서 보낸 텍스트가 여기 자동으로 나타납니다..."></textarea>
+		<p id="sync-status" class="status">대기 중...</p>
+	</div>
 </div>
 
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+<script>
+	// ⚠️ 본인의 정보로 반드시 수정하세요!
+	const GITHUB_USER = "본인의_깃허브_아이디";
+	const REPO_NAME = "리포지토리_이름";
+	const FILE_PATH = "data.txt"; // 텍스트가 임시 저장될 파일명
 
-    // 공용 테스트용 Firebase 설정 (누구나 접근 가능하므로 민감한 정보는 주의)
-    const firebaseConfig = {
-        databaseURL: "https://text-relay-default-rtdb.asia-southeast1.firebasedatabase.app"
-    };
+	// ⚠️ 주의: 토큰을 공개 리포지토리에 올리면 깃허브가 자동으로 만료시킵니다.
+	// 이 방식은 임시 우회용이며, 전송 버튼을 누를 때 토큰을 창(prompt)에 입력하게 만들었습니다.
+	let GITHUB_TOKEN = "";
 
-    const app = initializeApp(firebaseConfig);
-    const db = getDatabase(app);
-    
-    let currentRoom = '';
+	function startAsLocal() {
+		document.getElementById('setup').style.display = 'none';
+		document.getElementById('local-area').style.display = 'block';
+	}
 
-    // 방 입장 함수
-    window.joinRoom = function() {
-        const roomName = document.getElementById('room-input').value.trim();
-        if(!roomName) { alert('방 이름을 입력하세요.'); return; }
-        
-        currentRoom = roomName;
-        document.getElementById('room-selection').style.display = 'none';
-        document.getElementById('chat-area').style.display = 'block';
-        document.getElementById('room-title').innerText = `접속된 방: ${currentRoom}`;
+	function startAsRemote() {
+		document.getElementById('setup').style.display = 'none';
+		document.getElementById('remote-area').style.display = 'block';
 
-        // 실시간 데이터 수신 대기 (소켓 통신처럼 작동)
-        const textRef = ref(db, 'rooms/' + currentRoom);
-        onValue(textRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data !== null) {
-                // 현재 내가 입력 중이 아닐 때만 덮어쓰기 (커서 튀는 현상 방지)
-                if (document.activeElement !== document.getElementById('text-box')) {
-                    document.getElementById('text-box').value = data;
-                }
-            }
-        });
-    }
+		// 3초마다 GitHub에 저장된 data.txt 내용을 읽어옴 (HTTPS 443 포트 사용으로 방화벽 통과)
+		setInterval(fetchFromGithub, 3000);
+		fetchFromGithub();
+	}
 
-    // 데이터 전송 함수 (텍스트 타이핑할 때마다 서버로 전송)
-    window.sendText = function(val) {
-        if(!currentRoom) return;
-        set(ref(db, 'rooms/' + currentRoom), val);
-    }
+	// [로컬] GitHub로 텍스트 업로드
+	async function sendToGithub() {
+		if (!GITHUB_TOKEN) {
+			GITHUB_TOKEN = prompt("GitHub Personal Access Token(Classic)을 입력하세요:\n(권한: repo 체크 필수)");
+			if (!GITHUB_TOKEN) return;
+		}
 
-    // 텍스트 초기화
-    window.clearText = function() {
-        document.getElementById('text-box').value = '';
-        sendText('');
-    }
+		const text = document.getElementById('local-text').value;
+		const statusSpan = document.getElementById('send-status');
+		statusSpan.innerText = "전송 중...";
+
+		const url = `https://api.github.com/repos/${GITHUB_USER}/${REPO_NAME}/contents/${FILE_PATH}`;
+
+		try {
+			// 기존 파일의 sha 값을 가져오기 위한 조회
+			let sha = "";
+			const resGet = await fetch(url, {
+				headers: { "Authorization": `token ${GITHUB_TOKEN}` }
+			});
+			if (resGet.ok) {
+				const dataGet = await resGet.json();
+				sha = dataGet.sha;
+			}
+
+			// 파일 업데이트 파일 내용을 Base64로 인코딩해야 함
+			const contentBase64 = btoa(unescape(encodeURIComponent(text)));
+
+			const resPut = await fetch(url, {
+				method: "PUT",
+				headers: {
+					"Authorization": `token ${GITHUB_TOKEN}`,
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify({
+					message: "update text",
+					content: contentBase64,
+					sha: sha
+				})
+			});
+
+			if (resPut.ok) {
+				statusSpan.innerText = "✅ 전송 완료! (원격지에서 3초 내에 반영됩니다)";
+			} else {
+				statusSpan.innerText = "❌ 전송 실패 (토큰 권한이나 아이디를 확인하세요)";
+			}
+		} catch (e) {
+			statusSpan.innerText = "❌ 에러 발생: " + e.message;
+		}
+	}
+
+	// [원격] GitHub에서 텍스트 다운로드
+	async function fetchFromGithub() {
+		const url = `https://raw.githubusercontent.com/${GITHUB_USER}/${REPO_NAME}/main/${FILE_PATH}?t=${new Date().getTime()}`;
+		const statusP = document.getElementById('sync-status');
+
+		try {
+			const res = await fetch(url);
+			if (res.ok) {
+				const text = await res.text();
+				document.getElementById('remote-text').value = text;
+				statusP.innerText = "🔄 최근 동기화 시간: " + new Date().toLocaleTimeString();
+			} else {
+				statusP.innerText = "⏳ 로컬에서 아직 한 번도 전송하지 않았거나 파일을 찾을 수 없습니다.";
+			}
+		} catch (e) {
+			statusP.innerText = "❌ 동기화 에러: " + e.message;
+		}
+	}
 </script>
 
 </body>
